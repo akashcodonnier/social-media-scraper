@@ -1,0 +1,10 @@
+requests
+Pillow
+rapidocr-onnxruntime
+python-dotenv
+selenium
+webdriver-manager
+indic-transliteration
+youtube-transcript-api
+fastapi
+uvicorn[standard]
