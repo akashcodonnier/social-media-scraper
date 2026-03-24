@@ -16,6 +16,7 @@ class YouTubeVideoScraper:
                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         }
+        self.cookies = {"CONSENT": "PENDING+987", "SOCS": "CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgJnPpwY"}
 
     def _clean_url(self, url):
         """Clean YouTube URL."""
@@ -133,7 +134,7 @@ class YouTubeVideoScraper:
         # === Step 1: Fetch page HTML ===
         print("  [1/2] Fetching YouTube page...")
         try:
-            resp = requests.get(watch_url, headers=self.headers, timeout=15)
+            resp = requests.get(watch_url, headers=self.headers, cookies=self.cookies, timeout=15)
             html = resp.text
         except Exception as e:
             return {"error": f"Failed to fetch page: {e}"}
@@ -210,20 +211,43 @@ class YouTubeVideoScraper:
         subtitles = {}
         try:
             ytt = YouTubeTranscriptApi()
-            for lang in ["hi", "en"]:
+
+            # First, list all available transcripts
+            transcript_list = ytt.list(video_id)
+            available_langs = []
+            for t in transcript_list:
+                available_langs.append({"lang": t.language_code, "auto": t.is_generated})
+
+            result["available_subtitle_langs"] = available_langs
+
+            # Try to fetch Hindi and English first, then fallback to any available
+            fetch_langs = ["hi", "en"]
+            fetched_codes = set()
+
+            for lang in fetch_langs:
                 try:
                     transcript = ytt.fetch(video_id, languages=[lang])
                     lines = [s.text for s in transcript.snippets if s.text.strip()]
                     if lines:
-                        subtitles[f"{lang} (auto)"] = "\n".join(lines)
+                        subtitles[lang] = "\n".join(lines)
+                        fetched_codes.add(lang)
                 except Exception:
                     pass
 
-            # Add Hinglish version
-            for key, text in list(subtitles.items()):
-                if key.startswith("hi"):
-                    subtitles["hinglish"] = self._to_hinglish(text)
-                    break
+            # If hi/en not available, fetch first available language
+            if not subtitles and available_langs:
+                first_lang = available_langs[0]["lang"]
+                try:
+                    transcript = ytt.fetch(video_id, languages=[first_lang])
+                    lines = [s.text for s in transcript.snippets if s.text.strip()]
+                    if lines:
+                        subtitles[first_lang] = "\n".join(lines)
+                except Exception:
+                    pass
+
+            # Add Hinglish version if Hindi is available
+            if "hi" in subtitles:
+                subtitles["hinglish"] = self._to_hinglish(subtitles["hi"])
         except Exception:
             pass
 
