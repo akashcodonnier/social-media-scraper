@@ -87,6 +87,7 @@ class YouTubeVideoScraper:
             "no_warnings": True,
             "skip_download": True,
             "no_color": True,
+            "extractor_args": {"youtube": {"player_client": ["mweb"]}},
         }
 
         try:
