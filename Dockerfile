@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
+ENV SKIP_SELENIUM=true
 
 WORKDIR /app
 

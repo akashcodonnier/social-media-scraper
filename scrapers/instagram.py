@@ -148,25 +148,19 @@ class InstagramPostScraper:
         else:
             print("    Failed")
 
-        # === Method 2: Selenium (optional, may fail on low-memory servers) ===
-        print("  [2/2] Loading page with Selenium...")
+        # === Method 2: Fetch HTML with requests (lightweight, no Chrome needed) ===
+        print("  [2/3] Fetching page HTML...")
         try:
-            self._start_browser()
-            self.driver.set_page_load_timeout(30)
-            self.driver.get(url)
-            time.sleep(3)
-
-            page_source = self.driver.page_source
+            resp = requests.get(url, timeout=15, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            })
+            page_source = resp.text
 
             if self.debug:
                 with open("debug_page.html", "w", encoding="utf-8") as f:
                     f.write(page_source)
-                print("    (saved debug_page.html)")
-
-            # Check if page exists
-            if "Sorry, this page" in page_source and not result.get("author"):
-                self._close_browser()
-                return {"error": "Post not found. Check the URL."}
 
             # --- Parse meta tags from raw HTML ---
             metas = self._extract_meta_from_html(page_source)
@@ -189,7 +183,6 @@ class InstagramPostScraper:
 
             # Author & Caption from title
             if og_title:
-                # Format: "Name on Instagram: "caption""
                 match = re.match(
                     r'^(.*?)\s+on Instagram:\s*["\u201c](.*?)["\u201d]\s*$',
                     og_title, re.DOTALL
@@ -210,7 +203,6 @@ class InstagramPostScraper:
                 if comments_m:
                     result["comments"] = self._parse_count(comments_m.group(1))
 
-                # Date from description
                 date_m = re.search(
                     r'on\s+((?:January|February|March|April|May|June|July|August|'
                     r'September|October|November|December)\s+\d{1,2},\s+\d{4})',
@@ -219,58 +211,71 @@ class InstagramPostScraper:
                 if date_m:
                     result["post_date"] = date_m.group(1)
 
-            # --- Try to get date from DOM ---
-            if "post_date" not in result:
+            print("    OK")
+        except Exception as e:
+            print(f"    HTML fetch failed: {e}")
+
+        # === Method 3: Selenium (only if CHROME_BIN not set = local dev) ===
+        use_selenium = not os.environ.get("SKIP_SELENIUM")
+        if use_selenium:
+            print("  [3/3] Loading page with Selenium...")
+            try:
+                self._start_browser()
+                self.driver.set_page_load_timeout(30)
+                self.driver.get(url)
+                time.sleep(3)
+
+                page_source = self.driver.page_source
+
+                # --- Try to get date from DOM ---
+                if "post_date" not in result:
+                    try:
+                        time_el = self.driver.find_element(By.CSS_SELECTOR, "time[datetime]")
+                        result["post_date"] = time_el.get_attribute("datetime")
+                    except Exception:
+                        pass
+
+                # --- Try to get images from DOM ---
                 try:
-                    time_el = self.driver.find_element(By.CSS_SELECTOR, "time[datetime]")
-                    result["post_date"] = time_el.get_attribute("datetime")
+                    img_els = self.driver.find_elements(
+                        By.CSS_SELECTOR,
+                        'img[src*="cdninstagram"], img[src*="instagram"]'
+                    )
+                    dom_images = []
+                    seen = set()
+                    for img in img_els:
+                        src = img.get_attribute("src") or ""
+                        alt = img.get_attribute("alt") or ""
+                        if (src and src not in seen
+                                and "s150x150" not in src
+                                and "44x44" not in src
+                                and "/rsrc.php" not in src):
+                            seen.add(src)
+                            dom_images.append({
+                                "media_url": src,
+                                "alt_text": alt,
+                                "is_video": False,
+                            })
+                    if dom_images:
+                        result["all_images"] = dom_images
+                        for img_data in dom_images:
+                            alt = img_data.get("alt_text", "")
+                            if alt and len(alt) > 30:
+                                result["image_alt"] = alt
+                                mentions = re.findall(r'@([\w.]+)', alt)
+                                if mentions:
+                                    result["mentions_from_alt"] = mentions
+                                break
                 except Exception:
                     pass
 
-            # --- Try to get images from DOM ---
-            try:
-                img_els = self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    'img[src*="cdninstagram"], img[src*="instagram"]'
-                )
-                dom_images = []
-                seen = set()
-                for img in img_els:
-                    src = img.get_attribute("src") or ""
-                    alt = img.get_attribute("alt") or ""
-                    # Skip profile pics and tiny icons
-                    if (src and src not in seen
-                            and "s150x150" not in src
-                            and "44x44" not in src
-                            and "/rsrc.php" not in src):
-                        seen.add(src)
-                        dom_images.append({
-                            "media_url": src,
-                            "alt_text": alt,
-                            "is_video": False,
-                        })
-                if dom_images:
-                    result["all_images"] = dom_images
-
-                    # Use alt text as better caption if available
-                    for img_data in dom_images:
-                        alt = img_data.get("alt_text", "")
-                        if alt and len(alt) > 30:
-                            result["image_alt"] = alt
-                            mentions = re.findall(r'@([\w.]+)', alt)
-                            if mentions:
-                                result["mentions_from_alt"] = mentions
-                            break
-            except Exception:
-                pass
-
-            print("    OK")
-
-        except Exception as e:
-            print(f"    Selenium failed: {e}")
-            print("    (returning oEmbed data only)")
-        finally:
-            self._close_browser()
+                print("    OK")
+            except Exception as e:
+                print(f"    Selenium failed: {e}")
+            finally:
+                self._close_browser()
+        else:
+            print("  [3/3] Selenium skipped (server mode)")
 
         # --- Extract hashtags and mentions from caption ---
         caption = result.get("caption", "")
