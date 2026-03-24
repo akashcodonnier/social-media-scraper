@@ -79,6 +79,51 @@ class YouTubeVideoScraper:
         resp = requests.post(url, json=payload, headers=headers, timeout=15)
         return resp.json()
 
+    def _fetch_innertube_web(self, video_id):
+        """Fetch caption data via Innertube WEB client (returns subtitle tracks)."""
+        url = "https://www.youtube.com/youtubei/v1/player"
+        payload = {
+            "videoId": video_id,
+            "context": {
+                "client": {
+                    "clientName": "WEB_EMBEDDED_PLAYER",
+                    "clientVersion": "1.20231219.01.00",
+                    "hl": "en",
+                    "gl": "US",
+                }
+            },
+            "thirdParty": {
+                "embedUrl": "https://www.google.com"
+            },
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": self.headers["User-Agent"],
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        return resp.json()
+
+    def _fetch_subtitles_from_url(self, base_url):
+        """Fetch subtitle text from YouTube caption URL."""
+        try:
+            # Add fmt=json3 for JSON format
+            sep = "&" if "?" in base_url else "?"
+            url = f"{base_url}{sep}fmt=json3"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                events = data.get("events", [])
+                lines = []
+                for event in events:
+                    segs = event.get("segs", [])
+                    text = "".join(s.get("utf8", "") for s in segs).strip()
+                    if text and text != "\n":
+                        lines.append(text)
+                return "\n".join(lines)
+        except Exception:
+            pass
+        return ""
+
     def _fetch_oembed(self, video_id):
         """Fetch basic info via YouTube oEmbed API (always works)."""
         url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
@@ -169,43 +214,93 @@ class YouTubeVideoScraper:
         # === Step 3: Fetch subtitles ===
         print("  [3/3] Fetching subtitles...")
         subtitles = {}
+        caption_tracks = []
+
+        # Method A: Get caption tracks from Innertube WEB_EMBEDDED client
         try:
-            ytt = YouTubeTranscriptApi()
+            web_player = self._fetch_innertube_web(video_id)
+            web_captions = web_player.get("captions", {}).get("playerCaptionsTracklistRenderer", {})
+            caption_tracks = web_captions.get("captionTracks", [])
 
-            transcript_list = ytt.list(video_id)
-            available_langs = []
-            for t in transcript_list:
-                available_langs.append({"lang": t.language_code, "auto": t.is_generated})
-            result["available_subtitle_langs"] = available_langs
+            if self.debug:
+                with open("debug_yt_web_captions.json", "w", encoding="utf-8") as f:
+                    json.dump(web_captions, f, indent=2, ensure_ascii=False)
 
-            # Try Hindi and English first
-            for lang in ["hi", "en"]:
-                try:
-                    transcript = ytt.fetch(video_id, languages=[lang])
-                    lines = [s.text for s in transcript.snippets if s.text.strip()]
-                    if lines:
-                        subtitles[lang] = "\n".join(lines)
-                except Exception:
-                    pass
-
-            # Fallback to first available language
-            if not subtitles and available_langs:
-                first_lang = available_langs[0]["lang"]
-                try:
-                    transcript = ytt.fetch(video_id, languages=[first_lang])
-                    lines = [s.text for s in transcript.snippets if s.text.strip()]
-                    if lines:
-                        subtitles[first_lang] = "\n".join(lines)
-                except Exception:
-                    pass
-
-            # Hinglish version from Hindi
-            if "hi" in subtitles:
-                subtitles["hinglish"] = self._to_hinglish(subtitles["hi"])
-
-            print("    OK")
+            # Update caption lang info
+            if caption_tracks:
+                result["subtitle_langs"] = []
+                result["auto_caption_langs"] = []
+                for track in caption_tracks:
+                    lang_code = track.get("languageCode", "")
+                    if track.get("kind") == "asr":
+                        result["auto_caption_langs"].append(lang_code)
+                    else:
+                        result["subtitle_langs"].append(lang_code)
         except Exception:
-            print("    No subtitles available")
+            pass
+
+        # Method B: Fetch subtitle text directly from caption URLs
+        if caption_tracks:
+            # Prioritize: hi, en, then any available
+            priority_langs = ["hi", "en"]
+            track_map = {t.get("languageCode", ""): t for t in caption_tracks}
+
+            for lang in priority_langs:
+                if lang in track_map:
+                    base_url = track_map[lang].get("baseUrl", "")
+                    if base_url:
+                        text = self._fetch_subtitles_from_url(base_url)
+                        if text:
+                            subtitles[lang] = text
+
+            # If no hi/en, fetch first available
+            if not subtitles and caption_tracks:
+                first_track = caption_tracks[0]
+                lang = first_track.get("languageCode", "unknown")
+                base_url = first_track.get("baseUrl", "")
+                if base_url:
+                    text = self._fetch_subtitles_from_url(base_url)
+                    if text:
+                        subtitles[lang] = text
+
+        # Method C: Fallback to youtube-transcript-api
+        if not subtitles:
+            try:
+                ytt = YouTubeTranscriptApi()
+                transcript_list = ytt.list(video_id)
+                available_langs = []
+                for t in transcript_list:
+                    available_langs.append({"lang": t.language_code, "auto": t.is_generated})
+
+                for lang in ["hi", "en"]:
+                    try:
+                        transcript = ytt.fetch(video_id, languages=[lang])
+                        lines = [s.text for s in transcript.snippets if s.text.strip()]
+                        if lines:
+                            subtitles[lang] = "\n".join(lines)
+                    except Exception:
+                        pass
+
+                if not subtitles and available_langs:
+                    first_lang = available_langs[0]["lang"]
+                    try:
+                        transcript = ytt.fetch(video_id, languages=[first_lang])
+                        lines = [s.text for s in transcript.snippets if s.text.strip()]
+                        if lines:
+                            subtitles[first_lang] = "\n".join(lines)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Add Hinglish version from Hindi
+        if "hi" in subtitles:
+            subtitles["hinglish"] = self._to_hinglish(subtitles["hi"])
+
+        if subtitles:
+            print("    OK")
+        else:
+            print("    No subtitles found")
 
         result["subtitles"] = subtitles
 
