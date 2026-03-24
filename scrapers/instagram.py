@@ -24,6 +24,10 @@ class InstagramPostScraper:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--single-process")
+        options.add_argument("--disable-setuid-sandbox")
         options.add_argument(
             "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -144,12 +148,13 @@ class InstagramPostScraper:
         else:
             print("    Failed")
 
-        # === Method 2: Selenium ===
+        # === Method 2: Selenium (optional, may fail on low-memory servers) ===
         print("  [2/2] Loading page with Selenium...")
-        self._start_browser()
         try:
+            self._start_browser()
+            self.driver.set_page_load_timeout(30)
             self.driver.get(url)
-            time.sleep(5)
+            time.sleep(3)
 
             page_source = self.driver.page_source
 
@@ -160,6 +165,7 @@ class InstagramPostScraper:
 
             # Check if page exists
             if "Sorry, this page" in page_source and not result.get("author"):
+                self._close_browser()
                 return {"error": "Post not found. Check the URL."}
 
             # --- Parse meta tags from raw HTML ---
@@ -250,11 +256,7 @@ class InstagramPostScraper:
                     for img_data in dom_images:
                         alt = img_data.get("alt_text", "")
                         if alt and len(alt) > 30:
-                            # Alt text format: "Photo by Username on Date. May be an image of text that says 'caption'"
-                            # Or: "Photo by User in Location. May contain text."
                             result["image_alt"] = alt
-
-                            # Extract mentions from alt text
                             mentions = re.findall(r'@([\w.]+)', alt)
                             if mentions:
                                 result["mentions_from_alt"] = mentions
@@ -264,6 +266,9 @@ class InstagramPostScraper:
 
             print("    OK")
 
+        except Exception as e:
+            print(f"    Selenium failed: {e}")
+            print("    (returning oEmbed data only)")
         finally:
             self._close_browser()
 
