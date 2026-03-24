@@ -103,6 +103,25 @@ class YouTubeVideoScraper:
         resp = requests.post(url, json=payload, headers=headers, timeout=15)
         return resp.json()
 
+    def _fetch_caption_tracks_from_page(self, video_id):
+        """Fetch caption tracks from YouTube watch page (works for Shorts too)."""
+        try:
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            resp = requests.get(url, timeout=15, headers={
+                **self.headers,
+                "Cookie": "CONSENT=YES+1",
+            })
+            match = re.search(
+                r'"captions":\s*(\{.*?"playerCaptionsTracklistRenderer".*?\})\s*,\s*"videoDetails"',
+                resp.text, re.DOTALL
+            )
+            if match:
+                captions = json.loads(match.group(1))
+                return captions.get("playerCaptionsTracklistRenderer", {}).get("captionTracks", [])
+        except Exception:
+            pass
+        return []
+
     def _fetch_subtitles_from_url(self, base_url):
         """Fetch subtitle text from YouTube caption URL."""
         try:
@@ -238,6 +257,23 @@ class YouTubeVideoScraper:
                         result["subtitle_langs"].append(lang_code)
         except Exception:
             pass
+
+        # Method A2: Get caption tracks from YouTube watch page (works for Shorts)
+        if not caption_tracks:
+            try:
+                page_tracks = self._fetch_caption_tracks_from_page(video_id)
+                if page_tracks:
+                    caption_tracks = page_tracks
+                    result["subtitle_langs"] = []
+                    result["auto_caption_langs"] = []
+                    for track in caption_tracks:
+                        lang_code = track.get("languageCode", "")
+                        if track.get("kind") == "asr":
+                            result["auto_caption_langs"].append(lang_code)
+                        else:
+                            result["subtitle_langs"].append(lang_code)
+            except Exception:
+                pass
 
         # Method B: Fetch subtitle text directly from caption URLs
         if caption_tracks:
