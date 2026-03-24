@@ -3,6 +3,7 @@ import re
 import json
 
 import requests
+import yt_dlp
 from indic_transliteration import sanscript
 from indic_transliteration.sanscript import transliterate
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -14,16 +15,7 @@ class YouTubeVideoScraper:
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
         }
-        self.cookies = {"CONSENT": "PENDING+987", "SOCS": "CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgJnPpwY"}
-
-    def _clean_url(self, url):
-        """Clean YouTube URL."""
-        url = url.strip()
-        if not url.startswith("http"):
-            url = f"https://www.youtube.com/watch?v={url}"
-        return url
 
     def _get_video_id(self, url):
         """Extract video ID from YouTube URL."""
@@ -62,51 +54,6 @@ class YouTubeVideoScraper:
             return f"{hours}:{minutes:02d}:{secs:02d}"
         return f"{minutes}:{secs:02d}"
 
-    def _parse_count_text(self, text):
-        """Parse count from text like '7,511,234 views' or '193K likes'."""
-        if not text:
-            return None
-        text = text.strip().replace(",", "")
-        match = re.search(r'([\d.]+)\s*([KMB]?)', text, re.IGNORECASE)
-        if match:
-            num = float(match.group(1))
-            suffix = match.group(2).upper()
-            mult = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1)
-            return int(num * mult)
-        return None
-
-    def _parse_iso_duration(self, duration_str):
-        """Parse ISO 8601 duration like PT30M13S to seconds."""
-        if not duration_str:
-            return None
-        match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration_str)
-        if match:
-            h = int(match.group(1) or 0)
-            m = int(match.group(2) or 0)
-            s = int(match.group(3) or 0)
-            return h * 3600 + m * 60 + s
-        return None
-
-    def _extract_json_from_html(self, html, var_name):
-        """Extract JSON object assigned to a JS variable in HTML."""
-        pattern = rf'var\s+{var_name}\s*=\s*(\{{.*?\}});'
-        match = re.search(pattern, html, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # Try alternative pattern (without var)
-        pattern = rf'{var_name}\s*=\s*(\{{.*?\}});'
-        match = re.search(pattern, html, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-        return None
-
     def _to_hinglish(self, hindi_text):
         """Convert Hindi (Devanagari) text to Hinglish (Roman script)."""
         lines = []
@@ -125,116 +72,97 @@ class YouTubeVideoScraper:
         return "\n".join(lines)
 
     def scrape_video(self, video_url):
-        """Scrape all data from a YouTube video link."""
-        url = self._clean_url(video_url)
-        video_id = self._get_video_id(url)
-        watch_url = f"https://www.youtube.com/watch?v={video_id}"
-        result = {"url": url, "video_id": video_id}
+        """Scrape all data from a YouTube video link using yt-dlp."""
+        video_url = video_url.strip()
+        if not video_url.startswith("http"):
+            video_url = f"https://www.youtube.com/watch?v={video_url}"
 
-        # === Step 1: Fetch page HTML ===
-        print("  [1/2] Fetching YouTube page...")
+        video_id = self._get_video_id(video_url)
+        result = {"url": video_url, "video_id": video_id}
+
+        # === Step 1: Fetch video info using yt-dlp ===
+        print("  [1/2] Fetching video info via yt-dlp...")
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "no_color": True,
+        }
+
         try:
-            resp = requests.get(watch_url, headers=self.headers, cookies=self.cookies, timeout=15)
-            html = resp.text
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
         except Exception as e:
-            return {"error": f"Failed to fetch page: {e}"}
+            return {"error": f"yt-dlp failed: {e}"}
 
         if self.debug:
-            with open("debug_yt_page.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            print("    (saved debug_yt_page.html)")
+            with open("debug_yt_info.json", "w", encoding="utf-8") as f:
+                json.dump(ydl.sanitize_info(info), f, indent=2, ensure_ascii=False)
 
-        # === Step 2: Extract JSON data from page ===
-        print("  [2/2] Parsing video data...")
+        # === Extract data from yt-dlp info ===
+        result["title"] = info.get("title", "")
+        result["channel"] = info.get("uploader", "") or info.get("channel", "")
+        result["channel_id"] = info.get("channel_id", "")
+        result["channel_url"] = info.get("channel_url", "") or info.get("uploader_url", "")
+        result["description"] = info.get("description", "")
+        result["views"] = info.get("view_count")
+        result["likes"] = info.get("like_count")
+        result["comment_count"] = info.get("comment_count")
+        result["is_live"] = info.get("is_live", False)
 
-        initial_data = self._extract_json_from_html(html, "ytInitialData")
-        player_response = self._extract_json_from_html(html, "ytInitialPlayerResponse")
+        # Thumbnail
+        thumbnails = info.get("thumbnails", [])
+        result["thumbnail"] = thumbnails[-1]["url"] if thumbnails else ""
 
-        if self.debug:
-            if initial_data:
-                with open("debug_yt_initial_data.json", "w", encoding="utf-8") as f:
-                    json.dump(initial_data, f, indent=2, ensure_ascii=False)
-            if player_response:
-                with open("debug_yt_player_response.json", "w", encoding="utf-8") as f:
-                    json.dump(player_response, f, indent=2, ensure_ascii=False)
-            print("    (saved debug JSON files)")
+        # Duration
+        duration_sec = info.get("duration")
+        result["duration"] = duration_sec
+        result["duration_formatted"] = self._format_duration(duration_sec)
 
-        # --- From playerResponse ---
-        if player_response:
-            video_details = player_response.get("videoDetails", {})
-            microformat = player_response.get("microformat", {}).get(
-                "playerMicroformatRenderer", {}
-            )
+        # Tags / Keywords
+        result["tags"] = info.get("tags", []) or []
 
-            result["title"] = video_details.get("title", "")
-            result["channel"] = video_details.get("author", "")
-            result["channel_id"] = video_details.get("channelId", "")
-            result["description"] = video_details.get("shortDescription", "")
-            result["views"] = int(video_details.get("viewCount", 0)) or None
-            result["is_live"] = video_details.get("isLiveContent", False)
-            result["thumbnail"] = video_details.get("thumbnail", {}).get(
-                "thumbnails", [{}]
-            )[-1].get("url", "")
+        # Dates
+        upload_date = info.get("upload_date", "")
+        if upload_date and len(upload_date) == 8:
+            result["upload_date"] = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
+        else:
+            result["upload_date"] = upload_date
 
-            # Duration
-            duration_sec = int(video_details.get("lengthSeconds", 0)) or None
-            result["duration"] = duration_sec
-            result["duration_formatted"] = self._format_duration(duration_sec)
+        # Categories
+        result["categories"] = info.get("categories", []) or []
+        result["language"] = info.get("language", "")
 
-            # Tags / Keywords
-            result["tags"] = video_details.get("keywords", [])
+        # Available subtitle languages
+        subtitles_info = info.get("subtitles", {})
+        auto_captions_info = info.get("automatic_captions", {})
+        result["subtitle_langs"] = list(subtitles_info.keys()) if subtitles_info else []
+        result["auto_caption_langs"] = list(auto_captions_info.keys()) if auto_captions_info else []
 
-            # From microformat
-            result["channel_url"] = microformat.get("ownerProfileUrl", "")
-            result["upload_date"] = microformat.get("publishDate", "")
-            result["categories"] = [microformat.get("category", "")] if microformat.get("category") else []
-            result["language"] = microformat.get("defaultAudioLanguage", "")
-
-            # Subtitles / Captions (from page data for language list)
-            captions_data = player_response.get("captions", {}).get(
-                "playerCaptionsTracklistRenderer", {}
-            )
-            caption_tracks = captions_data.get("captionTracks", [])
-
-            result["subtitle_langs"] = []
-            result["auto_caption_langs"] = []
-
-            for track in caption_tracks:
-                lang_code = track.get("languageCode", "")
-                is_auto = track.get("kind") == "asr"
-                if is_auto:
-                    result["auto_caption_langs"].append(lang_code)
-                else:
-                    result["subtitle_langs"].append(lang_code)
-
-        # Fetch actual subtitle text using youtube-transcript-api
+        # === Step 2: Fetch subtitles using youtube-transcript-api ===
+        print("  [2/2] Fetching subtitles...")
         subtitles = {}
         try:
             ytt = YouTubeTranscriptApi()
 
-            # First, list all available transcripts
+            # List available transcripts
             transcript_list = ytt.list(video_id)
             available_langs = []
             for t in transcript_list:
                 available_langs.append({"lang": t.language_code, "auto": t.is_generated})
-
             result["available_subtitle_langs"] = available_langs
 
-            # Try to fetch Hindi and English first, then fallback to any available
-            fetch_langs = ["hi", "en"]
-            fetched_codes = set()
-
-            for lang in fetch_langs:
+            # Try Hindi and English first
+            for lang in ["hi", "en"]:
                 try:
                     transcript = ytt.fetch(video_id, languages=[lang])
                     lines = [s.text for s in transcript.snippets if s.text.strip()]
                     if lines:
                         subtitles[lang] = "\n".join(lines)
-                        fetched_codes.add(lang)
                 except Exception:
                     pass
 
-            # If hi/en not available, fetch first available language
+            # Fallback to first available language
             if not subtitles and available_langs:
                 first_lang = available_langs[0]["lang"]
                 try:
@@ -245,7 +173,7 @@ class YouTubeVideoScraper:
                 except Exception:
                     pass
 
-            # Add Hinglish version if Hindi is available
+            # Hinglish version from Hindi
             if "hi" in subtitles:
                 subtitles["hinglish"] = self._to_hinglish(subtitles["hi"])
         except Exception:
@@ -253,77 +181,12 @@ class YouTubeVideoScraper:
 
         result["subtitles"] = subtitles
 
-        # --- From initialData (likes, comment count) ---
-        if initial_data:
-            try:
-                # Navigate to primary results
-                contents = (
-                    initial_data.get("contents", {})
-                    .get("twoColumnWatchNextResults", {})
-                    .get("results", {})
-                    .get("results", {})
-                    .get("contents", [])
-                )
-
-                for item in contents:
-                    # Video primary info
-                    primary = item.get("videoPrimaryInfoRenderer", {})
-                    if primary:
-                        # Likes
-                        menu_items = (
-                            primary.get("videoActions", {})
-                            .get("menuRenderer", {})
-                            .get("topLevelButtons", [])
-                        )
-                        for btn in menu_items:
-                            toggle = btn.get("segmentedLikeDislikeButtonViewModel", {})
-                            like_btn = toggle.get("likeButtonViewModel", {}).get(
-                                "likeButtonViewModel", {}
-                            )
-                            like_count_str = like_btn.get("toggleButtonViewModel", {}).get(
-                                "toggleButtonViewModel", {}
-                            ).get("defaultButtonViewModel", {}).get(
-                                "buttonViewModel", {}
-                            ).get("title", "")
-                            if like_count_str:
-                                result["likes"] = self._parse_count_text(like_count_str)
-
-                        # Date
-                        date_text = primary.get("dateText", {}).get("simpleText", "")
-                        if date_text:
-                            result["date_text"] = date_text
-
-                    # Video secondary info - comment count
-                    section = item.get("itemSectionRenderer", {})
-                    section_contents = section.get("contents", [])
-                    for sc in section_contents:
-                        comment_header = sc.get("commentsEntryPointHeaderRenderer", {})
-                        if comment_header:
-                            count_text = comment_header.get("commentCount", {}).get("simpleText", "")
-                            if count_text:
-                                result["comment_count"] = self._parse_count_text(count_text)
-
-            except Exception:
-                pass
-
-        # --- Fallback: meta tags from HTML ---
-        if not result.get("title"):
-            match = re.search(r'<meta\s+name="title"\s+content="([^"]*)"', html)
-            if match:
-                result["title"] = match.group(1)
-
-        if not result.get("description"):
-            match = re.search(r'<meta\s+name="description"\s+content="([^"]*)"', html)
-            if match:
-                result["description"] = match.group(1)
-
         # Extract hashtags and mentions from description
         desc = result.get("description", "")
         if desc:
             hashtags = re.findall(r'#(\w+)', desc)
             if hashtags:
                 result["hashtags"] = hashtags
-
             mentions = re.findall(r'@([\w.]+)', desc)
             if mentions:
                 result["mentions"] = mentions
