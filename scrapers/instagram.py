@@ -31,8 +31,18 @@ class InstagramPostScraper:
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
 
-        service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=options)
+        # Use system Chrome in Docker, else auto-detect with webdriver-manager
+        chrome_bin = os.environ.get("CHROME_BIN")
+        if chrome_bin:
+            options.binary_location = chrome_bin
+
+        try:
+            # Try direct Chrome (works in Docker with system-installed Chrome)
+            self.driver = webdriver.Chrome(options=options)
+        except Exception:
+            # Fallback to webdriver-manager (local development)
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
 
         self.driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
