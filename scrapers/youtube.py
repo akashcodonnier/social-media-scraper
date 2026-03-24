@@ -3,7 +3,6 @@ import re
 import json
 
 import requests
-import yt_dlp
 from indic_transliteration import sanscript
 from indic_transliteration.sanscript import transliterate
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -28,19 +27,6 @@ class YouTubeVideoScraper:
             if match:
                 return match.group(1)
         return ""
-
-    def _format_count(self, count):
-        """Format large numbers for display."""
-        if count is None:
-            return "N/A"
-        count = int(count)
-        if count >= 1_000_000_000:
-            return f"{count / 1_000_000_000:.1f}B"
-        elif count >= 1_000_000:
-            return f"{count / 1_000_000:.1f}M"
-        elif count >= 1_000:
-            return f"{count / 1_000:.1f}K"
-        return str(count)
 
     def _format_duration(self, seconds):
         """Convert seconds to HH:MM:SS or MM:SS."""
@@ -71,8 +57,41 @@ class YouTubeVideoScraper:
             lines.append(simple)
         return "\n".join(lines)
 
+    def _fetch_innertube_player(self, video_id):
+        """Fetch video info via YouTube Innertube Player API (Android client)."""
+        url = "https://www.youtube.com/youtubei/v1/player"
+        payload = {
+            "videoId": video_id,
+            "context": {
+                "client": {
+                    "clientName": "ANDROID",
+                    "clientVersion": "19.09.37",
+                    "androidSdkVersion": 30,
+                    "hl": "en",
+                    "gl": "US",
+                }
+            },
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        return resp.json()
+
+    def _fetch_oembed(self, video_id):
+        """Fetch basic info via YouTube oEmbed API (always works)."""
+        url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        try:
+            resp = requests.get(url, timeout=10, headers=self.headers)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return None
+
     def scrape_video(self, video_url):
-        """Scrape all data from a YouTube video link using yt-dlp."""
+        """Scrape all data from a YouTube video link."""
         video_url = video_url.strip()
         if not video_url.startswith("http"):
             video_url = f"https://www.youtube.com/watch?v={video_url}"
@@ -80,73 +99,79 @@ class YouTubeVideoScraper:
         video_id = self._get_video_id(video_url)
         result = {"url": video_url, "video_id": video_id}
 
-        # === Step 1: Fetch video info using yt-dlp ===
-        print("  [1/2] Fetching video info via yt-dlp...")
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "no_color": True,
-            "extractor_args": {"youtube": {"player_client": ["mweb"]}},
-        }
-
+        # === Step 1: Innertube Player API ===
+        print("  [1/3] Fetching video info via Innertube API...")
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
+            player = self._fetch_innertube_player(video_id)
+
+            if self.debug:
+                with open("debug_yt_innertube.json", "w", encoding="utf-8") as f:
+                    json.dump(player, f, indent=2, ensure_ascii=False)
+
+            video_details = player.get("videoDetails", {})
+            microformat = player.get("microformat", {}).get("playerMicroformatRenderer", {})
+
+            if video_details:
+                result["title"] = video_details.get("title", "")
+                result["channel"] = video_details.get("author", "")
+                result["channel_id"] = video_details.get("channelId", "")
+                result["description"] = video_details.get("shortDescription", "")
+                result["views"] = int(video_details.get("viewCount", 0)) or None
+                result["is_live"] = video_details.get("isLiveContent", False)
+                result["tags"] = video_details.get("keywords", [])
+
+                # Thumbnail
+                thumbnails = video_details.get("thumbnail", {}).get("thumbnails", [])
+                result["thumbnail"] = thumbnails[-1]["url"] if thumbnails else ""
+
+                # Duration
+                duration_sec = int(video_details.get("lengthSeconds", 0)) or None
+                result["duration"] = duration_sec
+                result["duration_formatted"] = self._format_duration(duration_sec)
+
+            if microformat:
+                result["channel_url"] = microformat.get("ownerProfileUrl", "")
+                result["upload_date"] = microformat.get("publishDate", "")
+                result["categories"] = [microformat.get("category", "")] if microformat.get("category") else []
+                result["language"] = microformat.get("defaultAudioLanguage", "")
+
+            # Caption tracks info
+            captions_data = player.get("captions", {}).get("playerCaptionsTracklistRenderer", {})
+            caption_tracks = captions_data.get("captionTracks", [])
+            result["subtitle_langs"] = []
+            result["auto_caption_langs"] = []
+            for track in caption_tracks:
+                lang_code = track.get("languageCode", "")
+                if track.get("kind") == "asr":
+                    result["auto_caption_langs"].append(lang_code)
+                else:
+                    result["subtitle_langs"].append(lang_code)
+
+            print("    OK")
         except Exception as e:
-            return {"error": f"yt-dlp failed: {e}"}
+            print(f"    Innertube failed: {e}")
 
-        if self.debug:
-            with open("debug_yt_info.json", "w", encoding="utf-8") as f:
-                json.dump(ydl.sanitize_info(info), f, indent=2, ensure_ascii=False)
-
-        # === Extract data from yt-dlp info ===
-        result["title"] = info.get("title", "")
-        result["channel"] = info.get("uploader", "") or info.get("channel", "")
-        result["channel_id"] = info.get("channel_id", "")
-        result["channel_url"] = info.get("channel_url", "") or info.get("uploader_url", "")
-        result["description"] = info.get("description", "")
-        result["views"] = info.get("view_count")
-        result["likes"] = info.get("like_count")
-        result["comment_count"] = info.get("comment_count")
-        result["is_live"] = info.get("is_live", False)
-
-        # Thumbnail
-        thumbnails = info.get("thumbnails", [])
-        result["thumbnail"] = thumbnails[-1]["url"] if thumbnails else ""
-
-        # Duration
-        duration_sec = info.get("duration")
-        result["duration"] = duration_sec
-        result["duration_formatted"] = self._format_duration(duration_sec)
-
-        # Tags / Keywords
-        result["tags"] = info.get("tags", []) or []
-
-        # Dates
-        upload_date = info.get("upload_date", "")
-        if upload_date and len(upload_date) == 8:
-            result["upload_date"] = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
+        # === Step 2: oEmbed fallback for basic info ===
+        if not result.get("title"):
+            print("  [2/3] Trying oEmbed API fallback...")
+            oembed = self._fetch_oembed(video_id)
+            if oembed:
+                result["title"] = oembed.get("title", "")
+                result["channel"] = oembed.get("author_name", "")
+                result["channel_url"] = oembed.get("author_url", "")
+                result["thumbnail"] = oembed.get("thumbnail_url", "")
+                print("    OK")
+            else:
+                print("    Failed")
         else:
-            result["upload_date"] = upload_date
+            print("  [2/3] oEmbed skipped (Innertube data available)")
 
-        # Categories
-        result["categories"] = info.get("categories", []) or []
-        result["language"] = info.get("language", "")
-
-        # Available subtitle languages
-        subtitles_info = info.get("subtitles", {})
-        auto_captions_info = info.get("automatic_captions", {})
-        result["subtitle_langs"] = list(subtitles_info.keys()) if subtitles_info else []
-        result["auto_caption_langs"] = list(auto_captions_info.keys()) if auto_captions_info else []
-
-        # === Step 2: Fetch subtitles using youtube-transcript-api ===
-        print("  [2/2] Fetching subtitles...")
+        # === Step 3: Fetch subtitles ===
+        print("  [3/3] Fetching subtitles...")
         subtitles = {}
         try:
             ytt = YouTubeTranscriptApi()
 
-            # List available transcripts
             transcript_list = ytt.list(video_id)
             available_langs = []
             for t in transcript_list:
@@ -177,8 +202,10 @@ class YouTubeVideoScraper:
             # Hinglish version from Hindi
             if "hi" in subtitles:
                 subtitles["hinglish"] = self._to_hinglish(subtitles["hi"])
+
+            print("    OK")
         except Exception:
-            pass
+            print("    No subtitles available")
 
         result["subtitles"] = subtitles
 
@@ -192,7 +219,6 @@ class YouTubeVideoScraper:
             if mentions:
                 result["mentions"] = mentions
 
-        print("    OK")
         return result
 
     def download_thumbnail(self, result, output_dir="downloads"):

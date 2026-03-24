@@ -6,6 +6,5 @@ selenium
 webdriver-manager
 indic-transliteration
 youtube-transcript-api
-yt-dlp
 fastapi
 uvicorn[standard]
