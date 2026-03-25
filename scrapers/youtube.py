@@ -59,13 +59,14 @@ class YouTubeVideoScraper:
 
     def _fetch_innertube_player(self, video_id):
         """Fetch video info via YouTube Innertube Player API (Android client)."""
-        url = "https://www.youtube.com/youtubei/v1/player"
+        api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+        url = f"https://www.youtube.com/youtubei/v1/player?key={api_key}"
         payload = {
             "videoId": video_id,
             "context": {
                 "client": {
                     "clientName": "ANDROID",
-                    "clientVersion": "19.09.37",
+                    "clientVersion": "20.10.38",
                     "androidSdkVersion": 30,
                     "hl": "en",
                     "gl": "US",
@@ -74,7 +75,7 @@ class YouTubeVideoScraper:
         }
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+            "User-Agent": "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip",
         }
         resp = requests.post(url, json=payload, headers=headers, timeout=15)
         return resp.json()
